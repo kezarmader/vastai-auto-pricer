@@ -116,17 +116,23 @@ update_machine_price() {
 monitor_and_reprice() {
     local machines=$(vastai show machines --raw 2>/dev/null)
     
-    if [ -z "$machines" ] || [ "$machines" = "[]" ]; then
+    if [ -z "$machines" ] || [ "$machines" = "[]" ] || [ "$machines" = "{}" ]; then
         log_message "No machines found"
         return
     fi
     
-    local machine_count=$(echo "$machines" | jq 'length')
+    # Get all machine IDs - handle both array and object format
+    local machine_ids=$(echo "$machines" | jq -r 'if type == "array" then .[].id else to_entries[] | .value.id end' 2>/dev/null)
     
-    for ((i=0; i<machine_count; i++)); do
-        local machine=$(echo "$machines" | jq ".[$i]")
+    if [ -z "$machine_ids" ]; then
+        log_message "No machines found or error parsing response"
+        return
+    fi
+    
+    echo "$machine_ids" | while read -r machine_id; do
+        # Get the specific machine data
+        local machine=$(echo "$machines" | jq --arg id "$machine_id" 'if type == "array" then .[] | select(.id == ($id | tonumber)) else to_entries[] | .value | select(.id == ($id | tonumber)) end')
         
-        local machine_id=$(echo "$machine" | jq -r '.id')
         local gpu_name=$(echo "$machine" | jq -r '.gpu_name' | tr ' ' '_')
         local num_gpus=$(echo "$machine" | jq -r '.num_gpus')
         

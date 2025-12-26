@@ -115,7 +115,15 @@ function Update-MachinePrice {
 
 function Monitor-And-Reprice {
     try {
-        $machines = vastai show machines --raw | ConvertFrom-Json
+        $machinesJson = vastai show machines --raw | ConvertFrom-Json
+        
+        # Handle both array and object responses
+        if ($machinesJson -is [Array]) {
+            $machines = $machinesJson
+        } else {
+            # Convert object properties to array
+            $machines = $machinesJson.PSObject.Properties.Value
+        }
         
         if ($machines.Count -eq 0) {
             Write-Log "No machines found"
