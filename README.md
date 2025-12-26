@@ -38,12 +38,18 @@ sudo yum install jq bc      # CentOS/RHEL
 #### Test Mode (Recommended First)
 Run without making actual price changes:
 ```bash
-./monitor_vastai_pricing.sh 1 0.50 2.00 10 80 30 true
-# Arguments: interval(min) basePrice maxPrice priceStep% highThreshold lowThreshold testMode
+./monitor_vastai_pricing.sh 1 0.50 2.00 10 80 30 true RTX_5090 1
+# Arguments: interval basePrice maxPrice priceStep% highThreshold lowThreshold testMode targetGPU numGPUs
+```
+
+#### Help
+See all configuration options:
+```bash
+./monitor_vastai_pricing.sh --help
 ```
 
 #### Production Mode
-Run with default settings:
+Run with default settings (RTX 5090, 1 GPU):
 ```bash
 ./monitor_vastai_pricing.sh
 ```
@@ -56,20 +62,27 @@ nohup ./monitor_vastai_pricing.sh > /dev/null 2>&1 &
 # Stop: pkill -f monitor_vastai_pricing.sh
 ```
 
-#### Custom Configuration
+#### Custom Configuration Examples
 ```bash
-./monitor_vastai_pricing.sh 15 0.40 3.00 15 85 25 false
-# interval=15min, base=$0.40, max=$3.00, step=15%, highDemand=85%, lowDemand=25%, testMode=false
+# Monitor RTX 4090 with 2 GPUs, custom pricing
+./monitor_vastai_pricing.sh 15 0.40 3.00 15 85 25 false RTX_4090 2
+
+# Monitor RTX 3090 with 4 GPUs in test mode
+./monitor_vastai_pricing.sh 5 0.30 2.50 12 80 30 true RTX_3090 4
+
+# Default 5090 x1 but custom price range
+./monitor_vastai_pricing.sh 10 0.60 4.00 10 80 30 false
 ```
 
 ### Windows
 
 #### Test Mode (Recommended First)
 ```powershell
-.\monitor_vastai_pricing.ps1 -TestMode -IntervalMinutes 1
+.\monitor_vastai_pricing.ps1 -TestMode -IntervalMinutes 1 -TargetGPU "RTX_5090" -TargetNumGPUs 1
 ```
 
 #### Production Mode
+Run with default settings (RTX 5090, 1 GPU):
 ```powershell
 .\monitor_vastai_pricing.ps1
 ```
@@ -79,26 +92,44 @@ nohup ./monitor_vastai_pricing.sh > /dev/null 2>&1 &
 Start-Process powershell -ArgumentList "-File .\monitor_vastai_pricing.ps1" -WindowStyle Hidden
 ```
 
-#### Custom Configuration
+#### Custom Configuration Examples
 ```powershell
+# Monitor RTX 4090 with 2 GPUs, custom pricing
 .\monitor_vastai_pricing.ps1 `
+    -TargetGPU "RTX_4090" `
+    -TargetNumGPUs 2 `
     -BasePrice 0.40 `
     -MaxPrice 3.00 `
     -IntervalMinutes 15 `
     -PriceStepPercent 15 `
     -HighDemandThreshold 85 `
     -LowDemandThreshold 25
+
+# Monitor RTX 3090 with 4 GPUs in test mode
+.\monitor_vastai_pricing.ps1 `
+    -TestMode `
+    -TargetGPU "RTX_3090" `
+    -TargetNumGPUs 4 `
+    -IntervalMinutes 5
 ```rt-Process powershell -ArgumentList "-File .\monitor_vastai_pricing.ps1" -WindowStyle Hidden
 ```
 
-### Custom Configuration
-```powershell
-.\monitor_vastai_pricing.ps1 `
-    -BasePrice 0.40 `
-    -MaxPrice 3.00 `
-    -IntervalMinutes 15 `
-    -PriceStepPercent 15 `
-## Stopping the Script
+## Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `IntervalMinutes` | 10 | How often to check and adjust prices |
+| `BasePrice` | 0.50 | Minimum price per GPU per hour |
+| `MaxPrice` | 2.00 | Maximum price per GPU per hour |
+| `PriceStepPercent` | 10 | Percentage to adjust price each time |
+| `HighDemandThreshold` | 80 | Market utilization % to trigger price increase |
+| `LowDemandThreshold` | 30 | Market utilization % to trigger price decrease |
+| `TargetGPU` | RTX_5090 | GPU model to monitor and reprice |
+| `TargetNumGPUs` | 1 | Number of GPUs to filter for |
+| `LogFile` | vastai_pricing_log.txt | Path to log file |
+| `TestMode` | false | Run without making actual changes |
+
+## How It Works
 
 ### Linux
 - Foreground: Press `Ctrl+C`

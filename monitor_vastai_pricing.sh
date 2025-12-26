@@ -12,6 +12,8 @@ PRICE_STEP_PERCENT=${4:-10}
 HIGH_DEMAND_THRESHOLD=${5:-80}
 LOW_DEMAND_THRESHOLD=${6:-30}
 TEST_MODE=${7:-false}
+TARGET_GPU=${8:-RTX_5090}      # Filter for specific GPU model
+TARGET_NUM_GPUS=${9:-1}        # Filter for specific number of GPUs
 
 # Arrays to store state
 declare -A last_utilization
@@ -27,8 +29,8 @@ get_market_demand() {
     local gpu_name="$1"
     local num_gpus="$2"
     
-    # Search for similar offers to gauge market demand
-    local search_query="gpu_name=$gpu_name num_gpus=$num_gpus rentable=true"
+    # Search for similar offers to gauge market demand (filter by target GPU)
+    local search_query="gpu_name=$TARGET_GPU num_gpus=$TARGET_NUM_GPUS rentable=true"
     local offers=$(vastai search offers "$search_query" --raw 2>/dev/null)
     
     if [ -z "$offers" ] || [ "$offers" = "[]" ]; then
@@ -127,6 +129,11 @@ monitor_and_reprice() {
         local machine_id=$(echo "$machine" | jq -r '.id')
         local gpu_name=$(echo "$machine" | jq -r '.gpu_name' | tr ' ' '_')
         local num_gpus=$(echo "$machine" | jq -r '.num_gpus')
+        
+        # Skip machines that don't match target GPU and count
+        if [ "$gpu_name" != "$TARGET_GPU" ] || [ "$num_gpus" -ne "$TARGET_NUM_GPUS" ]; then
+            continue
+        fi
         local current_price=$(echo "$machine" | jq -r '.min_bid')
         local is_rented=$(echo "$machine" | jq -r '.rented')
         
@@ -156,11 +163,31 @@ monitor_and_reprice() {
     done
 }
 
+# Display usage if --help is passed
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: $0 [interval] [basePrice] [maxPrice] [priceStep%] [highThreshold] [lowThreshold] [testMode] [targetGPU] [numGPUs]"
+    echo ""
+    echo "Arguments (all optional, shown with defaults):"
+    echo "  1. interval          Check interval in minutes (default: 10)"
+    echo "  2. basePrice         Minimum price per GPU/hr (default: 0.50)"
+    echo "  3. maxPrice          Maximum price per GPU/hr (default: 2.00)"
+    echo "  4. priceStep%        Price adjustment percentage (default: 10)"
+    echo "  5. highThreshold     High demand threshold % (default: 80)"
+    echo "  6. lowThreshold      Low demand threshold % (default: 30)"
+    echo "  7. testMode          Run without changes: true/false (default: false)"
+    echo "  8. targetGPU         GPU model to monitor (default: RTX_5090)"
+    echo "  9. numGPUs           Number of GPUs (default: 1)"
+    echo ""
+    echo "Example: $0 15 0.40 3.00 15 85 25 true RTX_4090 2"
+    exit 0
+fi
+
 # Main script
 log_message "=== Vast.ai Auto-Pricer Started ==="
 if [ "$TEST_MODE" = "true" ]; then
     log_message "*** RUNNING IN TEST MODE - NO ACTUAL PRICE CHANGES WILL BE MADE ***"
 fi
+log_message "Target GPU: $TARGET_GPU x$TARGET_NUM_GPUS"
 log_message "Check interval: $INTERVAL_MINUTES minutes"
 log_message "Base price: \$$BASE_PRICE | Max price: \$$MAX_PRICE | Price step: ${PRICE_STEP_PERCENT}%"
 log_message "High demand threshold: ${HIGH_DEMAND_THRESHOLD}% | Low demand threshold: ${LOW_DEMAND_THRESHOLD}%"

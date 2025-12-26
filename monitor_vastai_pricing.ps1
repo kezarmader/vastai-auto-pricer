@@ -9,7 +9,9 @@ param(
     [double]$PriceStepPercent = 10,     # Percentage to adjust price (10 = 10%)
     [int]$HighDemandThreshold = 80,     # If utilization > 80%, increase price
     [int]$LowDemandThreshold = 30,      # If utilization < 30%, decrease price
-    [switch]$TestMode                   # Run in test mode (no actual price changes)
+    [switch]$TestMode,                  # Run in test mode (no actual price changes)
+    [string]$TargetGPU = "RTX_5090",    # Filter for specific GPU model
+    [int]$TargetNumGPUs = 1             # Filter for specific number of GPUs
 )
 
 $LogPath = Join-Path $PSScriptRoot $LogFile
@@ -28,8 +30,8 @@ function Get-MarketDemand {
     param([string]$GpuName, [int]$NumGpus)
     
     try {
-        # Search for similar offers to gauge market demand
-        $searchQuery = "gpu_name=$GpuName num_gpus=$NumGpus rentable=true"
+        # Search for similar offers to gauge market demand (filter by target GPU)
+        $searchQuery = "gpu_name=$TargetGPU num_gpus=$TargetNumGPUs rentable=true"
         $offers = vastai search offers $searchQuery --raw | ConvertFrom-Json
         
         if ($offers.Count -eq 0) { return 50 } # Default to 50% if no data
@@ -124,6 +126,12 @@ function Monitor-And-Reprice {
             $machineId = $machine.id
             $gpuName = $machine.gpu_name -replace ' ', '_'
             $numGpus = $machine.num_gpus
+            
+            # Skip machines that don't match target GPU and count
+            if ($gpuName -ne $TargetGPU -or $numGpus -ne $TargetNumGPUs) {
+                continue
+            }
+            
             $currentPrice = $machine.min_bid
             $status = $machine.rented
             $rentedStr = if ($status) { "RENTED" } else { "AVAILABLE" }
@@ -161,6 +169,7 @@ Write-Log "=== Vast.ai Auto-Pricer Started ==="
 if ($TestMode) {
     Write-Log "*** RUNNING IN TEST MODE - NO ACTUAL PRICE CHANGES WILL BE MADE ***"
 }
+Write-Log "Target GPU: $TargetGPU x$TargetNumGPUs"
 Write-Log "Check interval: $IntervalMinutes minutes"
 Write-Log "Base price: `$$BasePrice | Max price: `$$MaxPrice | Price step: ${PriceStepPercent}%"
 Write-Log "High demand threshold: ${HighDemandThreshold}% | Low demand threshold: ${LowDemandThreshold}%"
