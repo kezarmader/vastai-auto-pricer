@@ -14,40 +14,81 @@ Automatically monitor and adjust pricing for your Vast.ai hosted machines based 
 ## Prerequisites
 
 - Vast.ai CLI installed and configured (`vastai` command available)
-- PowerShell 5.1 or higher (Windows)
+- **Linux**: Bash shell with `jq` and `bc` installed
+- **Windows**: PowerShell 5.1 or higher
 - Active Vast.ai host account with listed machines
-
 ## Installation
 
 1. Clone this repository:
 ```bash
-git clone <your-repo-url>
-cd autoPricer
+git clone https://github.com/kezarmader/vastai-auto-pricer.git
+cd vastai-auto-pricer
 ```
 
-2. Ensure Vast.ai CLI is set up:
+2. **Linux only**: Install required dependencies:
 ```bash
-vastai set api-key YOUR_API_KEY
+sudo apt-get install jq bc  # Ubuntu/Debian
+# or
+sudo yum install jq bc      # CentOS/RHEL
 ```
-
 ## Usage
 
-### Test Mode (Recommended First)
+### Linux
+
+#### Test Mode (Recommended First)
 Run without making actual price changes:
+```bash
+./monitor_vastai_pricing.sh 1 0.50 2.00 10 80 30 true
+# Arguments: interval(min) basePrice maxPrice priceStep% highThreshold lowThreshold testMode
+```
+
+#### Production Mode
+Run with default settings:
+```bash
+./monitor_vastai_pricing.sh
+```
+
+#### Background Mode
+Run continuously in background:
+```bash
+nohup ./monitor_vastai_pricing.sh > /dev/null 2>&1 &
+# Check if running: ps aux | grep monitor_vastai
+# Stop: pkill -f monitor_vastai_pricing.sh
+```
+
+#### Custom Configuration
+```bash
+./monitor_vastai_pricing.sh 15 0.40 3.00 15 85 25 false
+# interval=15min, base=$0.40, max=$3.00, step=15%, highDemand=85%, lowDemand=25%, testMode=false
+```
+
+### Windows
+
+#### Test Mode (Recommended First)
 ```powershell
 .\monitor_vastai_pricing.ps1 -TestMode -IntervalMinutes 1
 ```
 
-### Production Mode
-Run with actual price adjustments:
+#### Production Mode
 ```powershell
 .\monitor_vastai_pricing.ps1
 ```
 
-### Background Mode
-Run continuously in background:
+#### Background Mode
 ```powershell
 Start-Process powershell -ArgumentList "-File .\monitor_vastai_pricing.ps1" -WindowStyle Hidden
+```
+
+#### Custom Configuration
+```powershell
+.\monitor_vastai_pricing.ps1 `
+    -BasePrice 0.40 `
+    -MaxPrice 3.00 `
+    -IntervalMinutes 15 `
+    -PriceStepPercent 15 `
+    -HighDemandThreshold 85 `
+    -LowDemandThreshold 25
+```rt-Process powershell -ArgumentList "-File .\monitor_vastai_pricing.ps1" -WindowStyle Hidden
 ```
 
 ### Custom Configuration
@@ -57,14 +98,18 @@ Start-Process powershell -ArgumentList "-File .\monitor_vastai_pricing.ps1" -Win
     -MaxPrice 3.00 `
     -IntervalMinutes 15 `
     -PriceStepPercent 15 `
-    -HighDemandThreshold 85 `
-    -LowDemandThreshold 25
-```
+## Stopping the Script
 
-## Parameters
+### Linux
+- Foreground: Press `Ctrl+C`
+- Background: `pkill -f monitor_vastai_pricing.sh`
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
+### Windows
+- Foreground: Press `Ctrl+C`
+- Background:
+```powershell
+Get-Process powershell | Where-Object {$_.CommandLine -match "monitor_vastai_pricing"} | Stop-Process
+```---------|---------|-------------|
 | `IntervalMinutes` | 10 | How often to check and adjust prices |
 | `BasePrice` | 0.50 | Minimum price per GPU per hour |
 | `MaxPrice` | 2.00 | Maximum price per GPU per hour |
