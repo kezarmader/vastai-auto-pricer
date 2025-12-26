@@ -30,60 +30,133 @@ function Get-MarketDemand {
     param([string]$GpuName, [int]$NumGpus)
     
     try {
-        # Search for similar offers to gauge market demand (filter by target GPU)
-        $searchQuery = "gpu_name=$TargetGPU num_gpus=$TargetNumGPUs rentable=true"
+        # Search for similar offers - same GPU model and count, available for rent
+        $searchQuery = "gpu_name=$TargetGPU num_gpus=$TargetNumGPUs rentable=true reliability>0.95"
         $offers = vastai search offers $searchQuery --raw | ConvertFrom-Json
         
-        if ($offers.Count -eq 0) { return 50 } # Default to 50% if no data
+        if ($offers.Count -eq 0) { 
+            Write-Log "No comparable offers found in market"
+            return @{ DemandPercent = 50; AvgPrice = $null; MedianPrice = $null; MinPrice = $null; RentedCount = 0; TotalCount = 0 }
+        }
         
-        # Calculate percentage of rented machines (demand indicator)
+        # Calculate demand metrics
         $totalOffers = $offers.Count
         $rentedOffers = ($offers | Where-Object { $_.rented -eq $true }).Count
         $demandPercent = [math]::Round(($rentedOffers / $totalOffers) * 100, 1)
         
-        return $demandPercent
+        # Analyze pricing of available (not rented) similar machines
+        $availableOffers = $offers | Where-Object { $_.rented -eq $false }
+        $prices = $availableOffers | ForEach-Object { $_.dph_base } | Where-Object { $_ -gt 0 }
+        
+        $avgPrice = if ($prices.Count -gt 0) { [math]::Round(($prices | Measure-Object -Average).Average, 4) } else { $null }
+        $medianPrice = if ($prices.Count -gt 0) { 
+            $sorted = $prices | Sort-Object
+            $mid = [math]::Floor($sorted.Count / 2)
+            [math]::Round($sorted[$mid], 4)
+        } else { $null }
+        $minPrice = if ($prices.Count -gt 0) { [math]::Round(($prices | Measure-Object -Minimum).Minimum, 4) } else { $null }
+        
+        return @{
+            DemandPercent = $demandPercent
+            AvgPrice = $avgPrice
+            MedianPrice = $medianPrice
+            MinPrice = $minPrice
+            RentedCount = $rentedOffers
+            TotalCount = $totalOffers
+        }
     }
     catch {
         Write-Log "ERROR getting market demand: $($_.Exception.Message)"
-        return 50 # Default to 50% on error
+        return @{ DemandPercent = 50; AvgPrice = $null; MedianPrice = $null; MinPrice = $null; RentedCount = 0; TotalCount = 0 }
     }
 }
 
 function Calculate-NewPrice {
     param(
         [double]$CurrentPrice,
-        [double]$DemandPercent,
+        [hashtable]$MarketData,
         [string]$MachineId
     )
     
+    $demandPercent = $MarketData.DemandPercent
     $newPrice = $CurrentPrice
     $action = "HOLD"
+    $reason = "Demand: ${demandPercent}%"
     
-    # Get historical trend
-    if ($script:lastUtilization.ContainsKey($MachineId)) {
-        $lastDemand = $script:lastUtilization[$MachineId]
-        $trendUp = $DemandPercent -gt $lastDemand
+    # Strategy: Price competitively based on market conditions
+    # High demand (>80%) = Price above median for max profit
+    # Medium demand (30-80%) = Price near median for balance
+    # Low demand (<30%) = Price below median for occupancy
+    
+    if ($MarketData.MedianPrice -and $MarketData.AvgPrice) {
+        $medianPrice = $MarketData.MedianPrice
+        $avgPrice = $MarketData.AvgPrice
+        $minMarketPrice = $MarketData.MinPrice
+        
+        Write-Log "Market analysis: Median=`$$medianPrice, Avg=`$$avgPrice, Min=`$$minMarketPrice, Rented=$($MarketData.RentedCount)/$($MarketData.TotalCount)"
+        
+        if ($demandPercent -ge $HighDemandThreshold) {
+            # High demand: Price at 90-100% of median (competitive but profitable)
+            $targetPrice = $medianPrice * 0.95
+            $targetPrice = [math]::Min($targetPrice, $MaxPrice)
+            $targetPrice = [math]::Max($targetPrice, $BasePrice)
+            
+            if ($targetPrice -gt $CurrentPrice) {
+                $newPrice = $targetPrice
+                $action = "INCREASE"
+                $reason = "High demand (${demandPercent}%) - pricing at 95% of market median"
+            }
+        }
+        elseif ($demandPercent -le $LowDemandThreshold) {
+            # Low demand: Price at 80-90% of minimum to attract renters
+            $targetPrice = $minMarketPrice * 0.85
+            $targetPrice = [math]::Max($targetPrice, $BasePrice)
+            $targetPrice = [math]::Min($targetPrice, $MaxPrice)
+            
+            if ($targetPrice -lt $CurrentPrice) {
+                $newPrice = $targetPrice
+                $action = "DECREASE"
+                $reason = "Low demand (${demandPercent}%) - pricing at 85% of market minimum for occupancy"
+            }
+        }
+        else {
+            # Medium demand: Price around median
+            $targetPrice = $medianPrice * 0.90
+            $targetPrice = [math]::Min($targetPrice, $MaxPrice)
+            $targetPrice = [math]::Max($targetPrice, $BasePrice)
+            
+            $priceDiff = [math]::Abs($targetPrice - $CurrentPrice)
+            if ($priceDiff -gt ($CurrentPrice * 0.05)) { # Only adjust if >5% difference
+                $newPrice = $targetPrice
+                $action = if ($targetPrice -gt $CurrentPrice) { "INCREASE" } else { "DECREASE" }
+                $reason = "Medium demand (${demandPercent}%) - aligning with market median"
+            }
+        }
+    }
+    else {
+        # Fallback to simple demand-based pricing if no market data
+        Write-Log "No market pricing data available, using demand-based strategy"
+        
+        if ($demandPercent -ge $HighDemandThreshold) {
+            $increase = $CurrentPrice * ($PriceStepPercent / 100)
+            $newPrice = [math]::Min($CurrentPrice + $increase, $MaxPrice)
+            $action = "INCREASE"
+            $reason = "High demand (${demandPercent}%) - no market data"
+        }
+        elseif ($demandPercent -le $LowDemandThreshold) {
+            $decrease = $CurrentPrice * ($PriceStepPercent / 100)
+            $newPrice = [math]::Max($CurrentPrice - $decrease, $BasePrice)
+            $action = "DECREASE"
+            $reason = "Low demand (${demandPercent}%) - no market data"
+        }
     }
     
-    # High demand - increase price
-    if ($DemandPercent -ge $HighDemandThreshold) {
-        $increase = $CurrentPrice * ($PriceStepPercent / 100)
-        $newPrice = [math]::Min($CurrentPrice + $increase, $MaxPrice)
-        $action = "INCREASE"
-    }
-    # Low demand - decrease price
-    elseif ($DemandPercent -le $LowDemandThreshold) {
-        $decrease = $CurrentPrice * ($PriceStepPercent / 100)
-        $newPrice = [math]::Max($CurrentPrice - $decrease, $BasePrice)
-        $action = "DECREASE"
-    }
-    
-    $script:lastUtilization[$MachineId] = $DemandPercent
+    $script:lastUtilization[$MachineId] = $demandPercent
     
     return @{
         NewPrice = [math]::Round($newPrice, 4)
         Action = $action
-        Reason = "Demand: ${DemandPercent}%"
+        Reason = $reason
     }
 }
 
@@ -115,17 +188,12 @@ function Update-MachinePrice {
 
 function Monitor-And-Reprice {
     try {
-        $machinesJson = vastai show machines --raw | ConvertFrom-Json
+        $response = vastai show machines --raw | ConvertFrom-Json
         
-        # Handle both array and object responses
-        if ($machinesJson -is [Array]) {
-            $machines = $machinesJson
-        } else {
-            # Convert object properties to array
-            $machines = $machinesJson.PSObject.Properties.Value
-        }
+        # Extract machines array from response
+        $machines = $response.machines
         
-        if ($machines.Count -eq 0) {
+        if (-not $machines -or $machines.Count -eq 0) {
             Write-Log "No machines found"
             return
         }
@@ -140,9 +208,9 @@ function Monitor-And-Reprice {
                 continue
             }
             
-            $currentPrice = $machine.min_bid
-            $status = $machine.rented
-            $rentedStr = if ($status) { "RENTED" } else { "AVAILABLE" }
+            $currentPrice = $machine.min_bid_price
+            $isRented = $machine.current_rentals_running -gt 0
+            $rentedStr = if ($isRented) { "RENTED" } else { "AVAILABLE" }
             
             # Initialize price history if needed
             if (-not $script:priceHistory.ContainsKey($machineId)) {
@@ -151,12 +219,12 @@ function Monitor-And-Reprice {
             
             Write-Log "--- Machine $machineId ($numGpus x $gpuName) | Status: $rentedStr | Current: `$$currentPrice/GPU/hr ---"
             
-            # Get market demand
-            $demandPercent = Get-MarketDemand -GpuName $gpuName -NumGpus $numGpus
-            Write-Log "Market demand for $gpuName (x$numGpus): ${demandPercent}%"
+            # Get market demand and pricing data
+            $marketData = Get-MarketDemand -GpuName $gpuName -NumGpus $numGpus
+            Write-Log "Market: $($marketData.RentedCount)/$($marketData.TotalCount) rented (${($marketData.DemandPercent)}% demand)"
             
-            # Calculate new price
-            $priceDecision = Calculate-NewPrice -CurrentPrice $currentPrice -DemandPercent $demandPercent -MachineId $machineId
+            # Calculate new price based on market conditions
+            $priceDecision = Calculate-NewPrice -CurrentPrice $currentPrice -MarketData $marketData -MachineId $machineId
             
             if ($priceDecision.Action -ne "HOLD") {
                 Write-Log "Action: $($priceDecision.Action) | $($priceDecision.Reason) | New Price: `$$($priceDecision.NewPrice)/GPU/hr"
