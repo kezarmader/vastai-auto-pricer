@@ -1,0 +1,13 @@
+# Logs
+*.log
+vastai_pricing_log.txt
+
+# PowerShell module cache
+*.psm1.cache
+
+# Temporary files
+*.tmp
+*.temp
+
+# User-specific configuration
+config.local.ps1
