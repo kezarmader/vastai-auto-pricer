@@ -24,6 +24,11 @@ class MarketData:
     verified_count: int
     avg_reliability: float
     min_verified_price: Optional[float]
+    # Unverified machine stats
+    unverified_count: int = 0
+    unverified_avg_price: Optional[float] = None
+    unverified_median_price: Optional[float] = None
+    unverified_min_price: Optional[float] = None
 
 
 @dataclass
