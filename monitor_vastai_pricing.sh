@@ -7,32 +7,28 @@
 INTERVAL_MINUTES=${1:-10}
 BASE_PRICE=${2:-0.50}
 MAX_PRICE=${3:-2.00}
-HIGH_DEMAND_THRESHOLD=${4:-80}
-LOW_DEMAND_THRESHOLD=${5:-30}
-TEST_MODE=${6:-false}
-TARGET_GPU=${7:-RTX_5090}
-TARGET_NUM_GPUS=${8:-1}
+TEST_MODE=${4:-false}
+TARGET_GPU=${5:-RTX_5090}
+TARGET_NUM_GPUS=${6:-1}
 
 # Show help
 if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
     echo "Vast.ai Auto-Pricer (Python-based)"
     echo ""
-    echo "Usage: $0 [interval] [basePrice] [maxPrice] [highThreshold] [lowThreshold] [testMode] [targetGPU] [numGPUs]"
+    echo "Usage: $0 [interval] [basePrice] [maxPrice] [testMode] [targetGPU] [numGPUs]"
     echo ""
     echo "Arguments:"
     echo "  interval        Minutes between checks (default: 10)"
     echo "  basePrice       Minimum price per GPU/hour (default: 0.50)"
     echo "  maxPrice        Maximum price per GPU/hour (default: 2.00)"
-    echo "  highThreshold   High demand threshold % (default: 80)"
-    echo "  lowThreshold    Low demand threshold % (default: 30)"
     echo "  testMode        true/false - test without changes (default: false)"
     echo "  targetGPU       GPU model to monitor (default: RTX_5090)"
     echo "  numGPUs         Number of GPUs to filter (default: 1)"
     echo ""
     echo "Examples:"
     echo "  $0                                # Use all defaults"
-    echo "  $0 5 0.40 3.00 85 25 false       # Custom settings"
-    echo "  $0 1 0.50 2.00 80 30 true        # Test mode"
+    echo "  $0 5 0.40 3.00 false              # Custom settings"
+    echo "  $0 1 0.50 2.00 true               # Test mode"
     exit 0
 fi
 
@@ -41,8 +37,6 @@ PYTHON_CMD="python3 vastai_autopricer.py"
 PYTHON_CMD="$PYTHON_CMD --interval $INTERVAL_MINUTES"
 PYTHON_CMD="$PYTHON_CMD --base-price $BASE_PRICE"
 PYTHON_CMD="$PYTHON_CMD --max-price $MAX_PRICE"
-PYTHON_CMD="$PYTHON_CMD --high-demand $HIGH_DEMAND_THRESHOLD"
-PYTHON_CMD="$PYTHON_CMD --low-demand $LOW_DEMAND_THRESHOLD"
 PYTHON_CMD="$PYTHON_CMD --target-gpu $TARGET_GPU"
 PYTHON_CMD="$PYTHON_CMD --num-gpus $TARGET_NUM_GPUS"
 

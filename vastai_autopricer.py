@@ -17,14 +17,11 @@ from typing import Optional, List, Dict
 @dataclass
 class MarketData:
     """Market analysis data for comparable machines"""
-    demand_percent: float
     avg_price: Optional[float]
     median_price: Optional[float]
     min_price: Optional[float]
-    rented_count: int
-    total_count: int
+    available_count: int  # Number of machines available to rent
     verified_count: int
-    verified_rented_count: int
     avg_reliability: float
     min_verified_price: Optional[float]
 
@@ -131,24 +128,15 @@ class VastAIPricer:
         
         if not offers or len(offers) == 0:
             self.logger.warning("No comparable offers found in market")
-            return MarketData(50.0, None, None, None, 0, 0, 0, 0, 0.0, None)
+            return MarketData(None, None, None, 0, 0, 0.0, None)
         
-        # Debug: Log rental status details
-        if len(offers) > 0:
-            sample_count = min(3, len(offers))
-            for i in range(sample_count):
-                offer = offers[i]
-                self.logger.debug(f"Offer {i}: id={offer.get('id')}, rented={offer.get('rented')}, occup={offer.get('occup')}, machine_id={offer.get('machine_id')}")
-        
-        total_count = len(offers)
-        # Check for rental status using 'rented' field as per API docs
-        rented_count = sum(1 for offer in offers if offer.get('rented', False))
-        demand_percent = round((rented_count / total_count) * 100, 1)
+        # Note: search offers only returns AVAILABLE machines, not rented ones
+        # So we can't calculate true demand % from this API
+        available_count = len(offers)
         
         # Analyze verified machines
         verified_offers = [o for o in offers if o.get('verified', False)]
         verified_count = len(verified_offers)
-        verified_rented_count = sum(1 for o in verified_offers if o.get('rented', False))
         
         # Calculate average reliability
         reliabilities = [o.get('reliability2', 0) for o in offers if o.get('reliability2', 0) > 0]
@@ -170,16 +158,14 @@ class VastAIPricer:
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
         if not available_prices:
-            return MarketData(demand_percent, None, None, None, rented_count, total_count, 
-                            verified_count, verified_rented_count, avg_reliability, min_verified_price)
+            return MarketData(None, None, None, available_count, verified_count, avg_reliability, min_verified_price)
         
         available_prices.sort()
         avg_price = round(sum(available_prices) / len(available_prices), 4)
         min_price = round(min(available_prices), 4)
         median_price = round(available_prices[len(available_prices) // 2], 4)
         
-        return MarketData(demand_percent, avg_price, median_price, min_price, rented_count, total_count,
-                         verified_count, verified_rented_count, avg_reliability, min_verified_price)
+        return MarketData(avg_price, median_price, min_price, available_count, verified_count, avg_reliability, min_verified_price)
     
     def calculate_price(self, machine: Machine, market: MarketData) -> PriceDecision:
         """Calculate optimal price based on market conditions and machine status"""
@@ -196,19 +182,16 @@ class VastAIPricer:
         
         # Log market analysis
         if market.median_price:
-            verified_demand = round((market.verified_rented_count / market.verified_count * 100), 1) if market.verified_count > 0 else 0
             self.logger.info(
-                f"Market: Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_price}, "
-                f"MinVerified=${market.min_verified_price if market.min_verified_price else 'N/A'}"
+                f"Market: {market.available_count} available machines | "
+                f"Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_price}"
             )
-            self.logger.info(
-                f"Demand: Overall={market.rented_count}/{market.total_count} ({market.demand_percent}%), "
-                f"Verified={market.verified_rented_count}/{market.verified_count} ({verified_demand}%), "
-                f"AvgReliability={market.avg_reliability}"
-            )
+            if market.min_verified_price:
+                self.logger.info(f"Verified: {market.verified_count} machines, MinPrice=${market.min_verified_price}")
+            self.logger.info(f"Avg Reliability: {market.avg_reliability}")
             
             position = self._get_price_position(current, market)
-            self.logger.info(f"Your position: {position}")
+            self.logger.info(f"Your price position: {position}")
         
         # Strategy depends on rental status
         if machine.is_rented:
@@ -247,7 +230,7 @@ class VastAIPricer:
         return PriceDecision(
             current,
             "HOLD",
-            f"Machine is RENTED - holding current price (demand: {market.demand_percent}%)"
+            f"Machine is RENTED - holding current price"
         )
     
     def _price_for_idle_machine(self, current: float, market: MarketData, machine: Machine) -> PriceDecision:
@@ -255,11 +238,11 @@ class VastAIPricer:
         config = self.config
         
         if not market.median_price:
-            # No market data - simple decrease to attract
+            # No market data - decrease to attract
             return PriceDecision(
                 self._clamp_price(current * 0.9),
                 "DECREASE",
-                "Machine IDLE + no market data - decreasing to attract renters"
+                "Machine IDLE + no market data - decreasing to attract customers"
             )
         
         # Use verified minimum as benchmark if machine is verified
@@ -278,41 +261,23 @@ class VastAIPricer:
             )
         
         elif current > reference_min:
-            # Between min and median - be more aggressive
-            if market.demand_percent <= config['low_demand_threshold']:
-                # Low demand - undercut minimum
-                target = reference_min * 0.90
+            # Between min and median - be aggressive
+            target = reference_min * 0.92
+            if abs(target - current) > current * 0.05:  # Only if 5%+ change
                 return PriceDecision(
                     self._clamp_price(target),
                     "DECREASE",
-                    f"Machine IDLE + low demand ({market.demand_percent}%) - undercutting minimum"
+                    f"Machine IDLE - pricing near market minimum to attract customers"
                 )
-            else:
-                # Medium demand - match minimum
-                target = reference_min * 0.95
-                if abs(target - current) > current * 0.05:  # Only if 5%+ change
-                    return PriceDecision(
-                        self._clamp_price(target),
-                        "DECREASE",
-                        f"Machine IDLE + medium demand - matching market minimum"
-                    )
         
         else:
-            # Already cheapest but still not rented
-            if market.demand_percent >= config['high_demand_threshold']:
-                # High demand - maybe price is too low?
-                target = market.min_price * 0.95
-                if target > current:
-                    return PriceDecision(
-                        self._clamp_price(target),
-                        "INCREASE",
-                        f"Machine IDLE despite high demand ({market.demand_percent}%) - test higher price"
-                    )
+            # Already cheapest - hold and wait
+            pass
         
         return PriceDecision(
             current,
             "HOLD",
-            f"Machine IDLE but already priced competitively ({market.demand_percent}% demand)"
+            f"Machine IDLE but already at/below market minimum - holding price"
         )
     
     def _clamp_price(self, price: float) -> float:
