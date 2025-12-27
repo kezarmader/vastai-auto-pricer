@@ -213,20 +213,7 @@ class VastAIPricer:
     
     def _price_for_rented_machine(self, current: float, market: MarketData) -> PriceDecision:
         """Pricing strategy for currently rented machines"""
-        config = self.config
-        
-        # Conservative: only increase during very high demand
-        if market.demand_percent >= 90 and market.median_price:
-            target = market.median_price * 1.05
-            target = self._clamp_price(target)
-            
-            if target > current * 1.1:  # Only if 10%+ increase
-                return PriceDecision(
-                    round(target, 4),
-                    "INCREASE",
-                    f"Machine RENTED + very high demand ({market.demand_percent}%) - test premium pricing"
-                )
-        
+        # Conservative: hold price while rented
         return PriceDecision(
             current,
             "HOLD",
@@ -318,7 +305,7 @@ class VastAIPricer:
             
             # Get market data
             market = self.get_market_data(machine.gpu_name, machine.num_gpus)
-            self.logger.info(f"Market: {market.rented_count}/{market.total_count} rented ({market.demand_percent}% demand)")
+            self.logger.info(f"Market: {market.available_count} available machines")
             
             # Calculate optimal price
             decision = self.calculate_price(machine, market)
