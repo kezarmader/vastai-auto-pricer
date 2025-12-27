@@ -128,7 +128,7 @@ class VastAIPricer:
     
     def get_market_data(self, gpu_name: str, num_gpus: int) -> MarketData:
         """Analyze market for comparable machines"""
-        search_query = f"gpu_name={gpu_name} num_gpus={num_gpus} rentable=true reliability>0.95"
+        search_query = f"gpu_name={gpu_name} num_gpus={num_gpus} rentable=true reliability>0.95 verified=any"
         offers = self.run_vastai_command(['vastai', 'search', 'offers', search_query, '--raw'])
         
         if not offers or len(offers) == 0:
@@ -139,8 +139,8 @@ class VastAIPricer:
         # So we can't calculate true demand % from this API
         available_count = len(offers)
         
-        # Analyze verified machines - check both 'verified' boolean and 'verification' string
-        verified_offers = [o for o in offers if o.get('verified', False) or o.get('verification') == 'verified']
+        # Analyze verified machines - check 'verification' string field
+        verified_offers = [o for o in offers if o.get('verification') == 'verified']
         verified_count = len(verified_offers)
         
         # Calculate average reliability
@@ -162,13 +162,13 @@ class VastAIPricer:
         verified_available_prices = [
             offer['dph_base']
             for offer in offers
-            if (offer.get('verified', False) or offer.get('verification') == 'verified') 
+            if offer.get('verification') == 'verified'
                and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
-        # Get unverified-only pricing
-        unverified_offers = [o for o in offers if not o.get('verified', False) and o.get('verification') != 'verified']
+        # Get unverified-only pricing (includes 'unverified' and 'deverified')
+        unverified_offers = [o for o in offers if o.get('verification') in ['unverified', 'deverified']]
         unverified_count = len(unverified_offers)
         unverified_available_prices = [
             offer['dph_base']
