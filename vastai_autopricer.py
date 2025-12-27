@@ -65,7 +65,7 @@ class VastAIPricer:
         date_format = '%Y-%m-%d %H:%M:%S'
         
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.DEBUG,  # Changed to DEBUG to see debug messages
             format=log_format,
             datefmt=date_format,
             handlers=[
@@ -133,23 +133,22 @@ class VastAIPricer:
             self.logger.warning("No comparable offers found in market")
             return MarketData(50.0, None, None, None, 0, 0, 0, 0, 0.0, None)
         
+        # Debug: Log rental status details
+        if len(offers) > 0:
+            sample_count = min(3, len(offers))
+            for i in range(sample_count):
+                offer = offers[i]
+                self.logger.debug(f"Offer {i}: id={offer.get('id')}, rented={offer.get('rented')}, occup={offer.get('occup')}, machine_id={offer.get('machine_id')}")
+        
         total_count = len(offers)
-        # Check multiple possible rental status fields
-        rented_count = sum(1 for offer in offers if (
-            offer.get('rented', False) or 
-            offer.get('current_rentals_running', 0) > 0 or
-            offer.get('num_instances_rented', 0) > 0
-        ))
+        # Check for rental status using 'rented' field as per API docs
+        rented_count = sum(1 for offer in offers if offer.get('rented', False))
         demand_percent = round((rented_count / total_count) * 100, 1)
         
         # Analyze verified machines
         verified_offers = [o for o in offers if o.get('verified', False)]
         verified_count = len(verified_offers)
-        verified_rented_count = sum(1 for o in verified_offers if (
-            o.get('rented', False) or 
-            o.get('current_rentals_running', 0) > 0 or
-            o.get('num_instances_rented', 0) > 0
-        ))
+        verified_rented_count = sum(1 for o in verified_offers if o.get('rented', False))
         
         # Calculate average reliability
         reliabilities = [o.get('reliability2', 0) for o in offers if o.get('reliability2', 0) > 0]
@@ -159,21 +158,14 @@ class VastAIPricer:
         available_prices = [
             offer['dph_base'] 
             for offer in offers 
-            if not (offer.get('rented', False) or 
-                   offer.get('current_rentals_running', 0) > 0 or
-                   offer.get('num_instances_rented', 0) > 0) 
-            and offer.get('dph_base', 0) > 0
+            if not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         
         # Get verified-only pricing
         verified_available_prices = [
             offer['dph_base']
             for offer in offers
-            if offer.get('verified', False) 
-            and not (offer.get('rented', False) or 
-                    offer.get('current_rentals_running', 0) > 0 or
-                    offer.get('num_instances_rented', 0) > 0)
-            and offer.get('dph_base', 0) > 0
+            if offer.get('verified', False) and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
