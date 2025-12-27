@@ -32,23 +32,16 @@ if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
     exit 0
 fi
 
-# Build Python command with arguments
-PYTHON_CMD="python3 vastai_autopricer.py"
-PYTHON_CMD="$PYTHON_CMD --interval $INTERVAL_MINUTES"
-PYTHON_CMD="$PYTHON_CMD --base-price $BASE_PRICE"
-PYTHON_CMD="$PYTHON_CMD --max-price $MAX_PRICE"
-PYTHON_CMD="$PYTHON_CMD --target-gpu $TARGET_GPU"
-PYTHON_CMD="$PYTHON_CMD --num-gpus $TARGET_NUM_GPUS"
-
-# Add test mode flag if enabled
+# Build command arguments
+ARGS="--interval $INTERVAL_MINUTES --base-price $BASE_PRICE --max-price $MAX_PRICE --target-gpu $TARGET_GPU --num-gpus $TARGET_NUM_GPUS"
 if [ "$TEST_MODE" == "true" ]; then
-    PYTHON_CMD="$PYTHON_CMD --test-mode"
+    ARGS="$ARGS --test-mode"
 fi
 
 # Show what we're running
 echo "Starting Vast.ai Auto-Pricer (Python version)..."
-echo "Command: $PYTHON_CMD"
+echo "Command: python3 -u vastai_autopricer.py $ARGS"
 echo ""
 
-# Execute the Python script
-exec python3 -u $PYTHON_CMD
+# Execute the Python script (with -u for unbuffered output)
+exec python3 -u vastai_autopricer.py $ARGS
