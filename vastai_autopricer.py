@@ -134,13 +134,22 @@ class VastAIPricer:
             return MarketData(50.0, None, None, None, 0, 0, 0, 0, 0.0, None)
         
         total_count = len(offers)
-        rented_count = sum(1 for offer in offers if offer.get('rented', False))
+        # Check multiple possible rental status fields
+        rented_count = sum(1 for offer in offers if (
+            offer.get('rented', False) or 
+            offer.get('current_rentals_running', 0) > 0 or
+            offer.get('num_instances_rented', 0) > 0
+        ))
         demand_percent = round((rented_count / total_count) * 100, 1)
         
         # Analyze verified machines
         verified_offers = [o for o in offers if o.get('verified', False)]
         verified_count = len(verified_offers)
-        verified_rented_count = sum(1 for o in verified_offers if o.get('rented', False))
+        verified_rented_count = sum(1 for o in verified_offers if (
+            o.get('rented', False) or 
+            o.get('current_rentals_running', 0) > 0 or
+            o.get('num_instances_rented', 0) > 0
+        ))
         
         # Calculate average reliability
         reliabilities = [o.get('reliability2', 0) for o in offers if o.get('reliability2', 0) > 0]
@@ -150,14 +159,21 @@ class VastAIPricer:
         available_prices = [
             offer['dph_base'] 
             for offer in offers 
-            if not offer.get('rented', False) and offer.get('dph_base', 0) > 0
+            if not (offer.get('rented', False) or 
+                   offer.get('current_rentals_running', 0) > 0 or
+                   offer.get('num_instances_rented', 0) > 0) 
+            and offer.get('dph_base', 0) > 0
         ]
         
         # Get verified-only pricing
         verified_available_prices = [
             offer['dph_base']
             for offer in offers
-            if offer.get('verified', False) and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
+            if offer.get('verified', False) 
+            and not (offer.get('rented', False) or 
+                    offer.get('current_rentals_running', 0) > 0 or
+                    offer.get('num_instances_rented', 0) > 0)
+            and offer.get('dph_base', 0) > 0
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
