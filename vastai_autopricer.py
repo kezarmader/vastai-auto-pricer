@@ -144,6 +144,13 @@ class VastAIPricer:
         verified_offers = [o for o in offers if o.get('verification') == 'verified']
         verified_count = len(verified_offers)
         
+        # Debug: Show verification breakdown
+        verification_stats = {}
+        for o in offers:
+            ver = o.get('verification', 'unknown')
+            verification_stats[ver] = verification_stats.get(ver, 0) + 1
+        self.logger.debug(f"Verification breakdown: {verification_stats}")
+        
         # Calculate average reliability
         reliabilities = [o.get('reliability2', 0) for o in offers if o.get('reliability2', 0) > 0]
         avg_reliability = round(sum(reliabilities) / len(reliabilities), 2) if reliabilities else 0.0
