@@ -139,8 +139,8 @@ class VastAIPricer:
         # So we can't calculate true demand % from this API
         available_count = len(offers)
         
-        # Analyze verified machines
-        verified_offers = [o for o in offers if o.get('verified', False)]
+        # Analyze verified machines - check both 'verified' boolean and 'verification' string
+        verified_offers = [o for o in offers if o.get('verified', False) or o.get('verification') == 'verified']
         verified_count = len(verified_offers)
         
         # Calculate average reliability
@@ -158,12 +158,13 @@ class VastAIPricer:
         verified_available_prices = [
             offer['dph_base']
             for offer in offers
-            if offer.get('verified', False) and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
+            if (offer.get('verified', False) or offer.get('verification') == 'verified') 
+               and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
         # Get unverified-only pricing
-        unverified_offers = [o for o in offers if not o.get('verified', False)]
+        unverified_offers = [o for o in offers if not o.get('verified', False) and o.get('verification') != 'verified']
         unverified_count = len(unverified_offers)
         unverified_available_prices = [
             offer['dph_base']
