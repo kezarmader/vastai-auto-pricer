@@ -36,8 +36,9 @@ vastai set api-key YOUR_API_KEY
 python3 --version
 ```
 
-4. **For Linux bash version**: Make the wrapper executable:
+4. **For Linux bash version**: Install dependencies:
 ```bash
+sudo apt-get install jq bc  # Ubuntu/Debian
 chmod +x monitor_vastai_pricing.sh
 ```
 ## Usage

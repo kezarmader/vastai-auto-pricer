@@ -5,6 +5,7 @@ param(
     [int]$IntervalMinutes = 10,
     [double]$BasePrice = 0.50,
     [double]$MaxPrice = 2.00,
+    [int]$PriceStepPercent = 10,
     [int]$HighDemandThreshold = 80,
     [int]$LowDemandThreshold = 30,
     [switch]$TestMode,
@@ -23,6 +24,7 @@ if ($Help) {
     Write-Host "  -IntervalMinutes       Minutes between checks (default: 10)" -ForegroundColor White
     Write-Host "  -BasePrice             Minimum price per GPU/hour (default: 0.50)" -ForegroundColor White
     Write-Host "  -MaxPrice              Maximum price per GPU/hour (default: 2.00)" -ForegroundColor White
+    Write-Host "  -PriceStepPercent      Price adjustment percentage (default: 10)" -ForegroundColor White
     Write-Host "  -HighDemandThreshold   High demand threshold % (default: 80)" -ForegroundColor White
     Write-Host "  -LowDemandThreshold    Low demand threshold % (default: 30)" -ForegroundColor White
     Write-Host "  -TestMode              Test without making changes (default: false)" -ForegroundColor White
@@ -42,6 +44,7 @@ $pythonArgs = @(
     "--interval", $IntervalMinutes,
     "--base-price", $BasePrice,
     "--max-price", $MaxPrice,
+    "--price-step", $PriceStepPercent,
     "--high-demand", $HighDemandThreshold,
     "--low-demand", $LowDemandThreshold,
     "--target-gpu", $TargetGPU,
