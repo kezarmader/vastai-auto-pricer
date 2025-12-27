@@ -157,15 +157,36 @@ class VastAIPricer:
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
         
+        # Get unverified-only pricing
+        unverified_offers = [o for o in offers if not o.get('verified', False)]
+        unverified_count = len(unverified_offers)
+        unverified_available_prices = [
+            offer['dph_base']
+            for offer in unverified_offers
+            if not offer.get('rented', False) and offer.get('dph_base', 0) > 0
+        ]
+        
+        unverified_avg_price = None
+        unverified_median_price = None
+        unverified_min_price = None
+        
+        if unverified_available_prices:
+            unverified_available_prices.sort()
+            unverified_avg_price = round(sum(unverified_available_prices) / len(unverified_available_prices), 4)
+            unverified_min_price = round(min(unverified_available_prices), 4)
+            unverified_median_price = round(unverified_available_prices[len(unverified_available_prices) // 2], 4)
+        
         if not available_prices:
-            return MarketData(None, None, None, available_count, verified_count, avg_reliability, min_verified_price)
+            return MarketData(None, None, None, available_count, verified_count, avg_reliability, min_verified_price,
+                            unverified_count, unverified_avg_price, unverified_median_price, unverified_min_price)
         
         available_prices.sort()
         avg_price = round(sum(available_prices) / len(available_prices), 4)
         min_price = round(min(available_prices), 4)
         median_price = round(available_prices[len(available_prices) // 2], 4)
         
-        return MarketData(avg_price, median_price, min_price, available_count, verified_count, avg_reliability, min_verified_price)
+        return MarketData(avg_price, median_price, min_price, available_count, verified_count, avg_reliability, min_verified_price,
+                        unverified_count, unverified_avg_price, unverified_median_price, unverified_min_price)
     
     def calculate_price(self, machine: Machine, market: MarketData) -> PriceDecision:
         """Calculate optimal price based on market conditions and machine status"""
@@ -183,14 +204,25 @@ class VastAIPricer:
         # Log market analysis
         if market.median_price:
             self.logger.info(
-                f"Market: {market.available_count} available machines | "
-                f"Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_price}"
+                f"Market: {market.available_count} available machines (Verified: {market.verified_count}, Unverified: {market.unverified_count})"
             )
-            if market.min_verified_price:
-                self.logger.info(f"Verified: {market.verified_count} machines, MinPrice=${market.min_verified_price}")
+            
+            if machine.verified and market.min_verified_price:
+                self.logger.info(
+                    f"Verified Market | Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_verified_price}"
+                )
+            elif not machine.verified and market.unverified_median_price:
+                self.logger.info(
+                    f"Unverified Market | Median=${market.unverified_median_price}, Avg=${market.unverified_avg_price}, Min=${market.unverified_min_price}"
+                )
+            else:
+                self.logger.info(
+                    f"Overall Market | Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_price}"
+                )
+            
             self.logger.info(f"Avg Reliability: {market.avg_reliability}")
             
-            position = self._get_price_position(current, market)
+            position = self._get_price_position(current, market, machine.verified)
             self.logger.info(f"Your price position: {position}")
         
         # Strategy depends on rental status
@@ -199,14 +231,22 @@ class VastAIPricer:
         else:
             return self._price_for_idle_machine(current, market, machine)
     
-    def _get_price_position(self, current_price: float, market: MarketData) -> str:
+    def _get_price_position(self, current_price: float, market: MarketData, is_verified: bool) -> str:
         """Determine price position relative to market"""
-        if not market.median_price:
+        # Compare against the appropriate peer group
+        if is_verified:
+            median = market.median_price
+            min_price = market.min_verified_price if market.min_verified_price else market.min_price
+        else:
+            median = market.unverified_median_price if market.unverified_median_price else market.median_price
+            min_price = market.unverified_min_price if market.unverified_min_price else market.min_price
+        
+        if not median:
             return "Unknown"
         
-        if current_price > market.median_price:
+        if current_price > median:
             return "Above median"
-        elif current_price > market.min_price:
+        elif current_price > min_price:
             return "Competitive"
         else:
             return "Below market"
