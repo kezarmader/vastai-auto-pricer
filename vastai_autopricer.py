@@ -154,6 +154,10 @@ class VastAIPricer:
             if not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         
+        # Debug: log the price range found
+        if available_prices:
+            self.logger.debug(f"Found {len(available_prices)} priced offers: min=${min(available_prices):.4f}, max=${max(available_prices):.4f}")
+        
         # Get verified-only pricing
         verified_available_prices = [
             offer['dph_base']
@@ -181,6 +185,7 @@ class VastAIPricer:
             unverified_avg_price = round(sum(unverified_available_prices) / len(unverified_available_prices), 4)
             unverified_min_price = round(min(unverified_available_prices), 4)
             unverified_median_price = round(unverified_available_prices[len(unverified_available_prices) // 2], 4)
+            self.logger.debug(f"Unverified prices: {len(unverified_available_prices)} offers, range ${unverified_min_price}-${max(unverified_available_prices):.4f}")
         
         if not available_prices:
             return MarketData(None, None, None, available_count, verified_count, avg_reliability, min_verified_price,
