@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -384,6 +385,9 @@ class VastAIPricer:
         try:
             while True:
                 self.process_machines()
+                self.logger.info(f"Sleeping for {self.config['interval_minutes']} minutes until next check...")
+                sys.stdout.flush()
+                sys.stderr.flush()
                 time.sleep(self.config['interval_minutes'] * 60)
         except KeyboardInterrupt:
             self.logger.info("Auto-pricer stopped by user")

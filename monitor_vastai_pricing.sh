@@ -51,4 +51,4 @@ echo "Command: $PYTHON_CMD"
 echo ""
 
 # Execute the Python script
-exec $PYTHON_CMD
+exec python3 -u $PYTHON_CMD
