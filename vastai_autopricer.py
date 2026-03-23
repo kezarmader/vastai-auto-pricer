@@ -7,11 +7,12 @@ Automatically adjusts pricing for Vast.ai hosted machines based on market demand
 import argparse
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -22,10 +23,20 @@ class MarketData:
     avg_price: Optional[float]
     median_price: Optional[float]
     min_price: Optional[float]
+    p25_price: Optional[float]  # 25th percentile
+    p75_price: Optional[float]  # 75th percentile
     available_count: int  # Number of machines available to rent
     verified_count: int
     avg_reliability: float
+    avg_disk_space: float
+    avg_inet_down: float
+    avg_inet_up: float
     min_verified_price: Optional[float]
+    # Verified machine stats
+    verified_avg_price: Optional[float] = None
+    verified_median_price: Optional[float] = None
+    verified_p25_price: Optional[float] = None
+    verified_p75_price: Optional[float] = None
     # Unverified machine stats
     unverified_count: int = 0
     unverified_avg_price: Optional[float] = None
@@ -47,7 +58,8 @@ class Machine:
     id: int
     gpu_name: str
     num_gpus: int
-    current_price: float
+    current_price: float    # min_bid_price (listing floor)
+    rental_price: Optional[float]  # actual price the renter is paying
     is_rented: bool
     verified: bool
     reliability: float
@@ -62,25 +74,39 @@ class VastAIPricer:
     def __init__(self, config: Dict):
         self.config = config
         self.idle_since: Dict[int, float] = {}  # machine_id -> timestamp when idle was first seen
-        self._idle_state_file = 'vastai_idle_state.json'
-        self._load_idle_state()
+        self.last_rented_price: Dict[int, float] = {}  # machine_id -> price it was last rented at
+        self._state_file = 'vastai_pricer_state.json'
+        self._load_state()
         self.setup_logging()
         
-    def _load_idle_state(self):
-        """Load persisted idle-since timestamps from disk"""
-        if os.path.exists(self._idle_state_file):
+    def _load_state(self):
+        """Load persisted state from disk"""
+        if os.path.exists(self._state_file):
             try:
-                with open(self._idle_state_file, 'r') as f:
+                with open(self._state_file, 'r') as f:
+                    raw = json.load(f)
+                self.idle_since = {int(k): v for k, v in raw.get('idle_since', {}).items()}
+                self.last_rented_price = {int(k): v for k, v in raw.get('last_rented_price', {}).items()}
+            except (json.JSONDecodeError, IOError):
+                self.idle_since = {}
+                self.last_rented_price = {}
+        # Migrate old idle-only state file
+        elif os.path.exists('vastai_idle_state.json'):
+            try:
+                with open('vastai_idle_state.json', 'r') as f:
                     raw = json.load(f)
                 self.idle_since = {int(k): v for k, v in raw.items()}
             except (json.JSONDecodeError, IOError):
                 self.idle_since = {}
 
-    def _save_idle_state(self):
-        """Persist idle-since timestamps to disk"""
+    def _save_state(self):
+        """Persist state to disk"""
         try:
-            with open(self._idle_state_file, 'w') as f:
-                json.dump(self.idle_since, f)
+            with open(self._state_file, 'w') as f:
+                json.dump({
+                    'idle_since': self.idle_since,
+                    'last_rented_price': self.last_rented_price
+                }, f)
         except IOError:
             pass
 
@@ -134,13 +160,29 @@ class VastAIPricer:
             
             # Filter by target GPU and count
             if gpu_name == target_gpu and num_gpus == target_count:
+                is_rented = machine_data['current_rentals_running'] > 0
+                # Get actual rental price — try multiple API fields
+                rental_price = None
+                if is_rented:
+                    for price_field in ['cur_bid', 'bid_price', 'dph_base', 'price_per_gpu']:
+                        val = machine_data.get(price_field)
+                        if val and val > 0:
+                            rental_price = val
+                            break
+                    self.logger.debug(f"Machine {machine_data['id']} rental price fields: "
+                                    f"cur_bid={machine_data.get('cur_bid')}, "
+                                    f"bid_price={machine_data.get('bid_price')}, "
+                                    f"dph_base={machine_data.get('dph_base')}, "
+                                    f"price_per_gpu={machine_data.get('price_per_gpu')}, "
+                                    f"min_bid_price={machine_data.get('min_bid_price')}")
                 machines.append(Machine(
                     id=machine_data['id'],
                     gpu_name=gpu_name,
                     num_gpus=num_gpus,
                     current_price=machine_data['min_bid_price'],
-                    is_rented=machine_data['current_rentals_running'] > 0,
-                    verified=machine_data.get('verified', False),
+                    rental_price=rental_price,
+                    is_rented=is_rented,
+                    verified=machine_data.get('verification') == 'verified' or machine_data.get('verified', False),
                     reliability=machine_data.get('reliability2', 0.0),
                     disk_space=machine_data.get('disk_space', 0.0),
                     inet_down=machine_data.get('inet_down', 0.0),
@@ -156,35 +198,37 @@ class VastAIPricer:
         
         if not offers or len(offers) == 0:
             self.logger.warning("No comparable offers found in market")
-            return MarketData(None, None, None, 0, 0, 0.0, None)
+            return MarketData(None, None, None, None, None, 0, 0, 0.0, 0.0, 0.0, 0.0, None)
         
-        # Note: search offers only returns AVAILABLE machines, not rented ones
-        # So we can't calculate true demand % from this API
         available_count = len(offers)
         
-        # Analyze verified machines - check 'verification' string field
+        # Analyze verified machines
         verified_offers = [o for o in offers if o.get('verification') == 'verified']
         verified_count = len(verified_offers)
         
-        # Debug: Show verification breakdown
         verification_stats = {}
         for o in offers:
             ver = o.get('verification', 'unknown')
             verification_stats[ver] = verification_stats.get(ver, 0) + 1
         self.logger.debug(f"Verification breakdown: {verification_stats}")
         
-        # Calculate average reliability
+        # Average specs across all offers (for quality comparison)
         reliabilities = [o.get('reliability2', 0) for o in offers if o.get('reliability2', 0) > 0]
         avg_reliability = round(sum(reliabilities) / len(reliabilities), 2) if reliabilities else 0.0
+        disk_spaces = [o.get('disk_space', 0) for o in offers if o.get('disk_space', 0) > 0]
+        avg_disk_space = round(sum(disk_spaces) / len(disk_spaces), 0) if disk_spaces else 0.0
+        inet_downs = [o.get('inet_down', 0) for o in offers if o.get('inet_down', 0) > 0]
+        avg_inet_down = round(sum(inet_downs) / len(inet_downs), 0) if inet_downs else 0.0
+        inet_ups = [o.get('inet_up', 0) for o in offers if o.get('inet_up', 0) > 0]
+        avg_inet_up = round(sum(inet_ups) / len(inet_ups), 0) if inet_ups else 0.0
         
-        # Get pricing from available (not rented) machines
+        # Get pricing from available machines
         available_prices = [
             offer['dph_base'] 
             for offer in offers 
             if not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         
-        # Debug: log the price range found
         if available_prices:
             self.logger.debug(f"Found {len(available_prices)} priced offers: min=${min(available_prices):.4f}, max=${max(available_prices):.4f}")
         
@@ -196,8 +240,22 @@ class VastAIPricer:
                and not offer.get('rented', False) and offer.get('dph_base', 0) > 0
         ]
         min_verified_price = round(min(verified_available_prices), 4) if verified_available_prices else None
+        verified_avg_price = None
+        verified_median_price = None
+        verified_p25 = None
+        verified_p75 = None
+        if verified_available_prices:
+            verified_available_prices = self._filter_outliers(verified_available_prices)
+            verified_available_prices.sort()
+            verified_avg_price = round(sum(verified_available_prices) / len(verified_available_prices), 4)
+            verified_median_price = self._percentile(verified_available_prices, 50)
+            verified_p25 = self._percentile(verified_available_prices, 25)
+            verified_p75 = self._percentile(verified_available_prices, 75)
+            self.logger.debug(f"Verified prices (filtered): {len(verified_available_prices)} offers, "
+                           f"P25=${verified_p25}, median=${verified_median_price}, P75=${verified_p75}, "
+                           f"range ${min(verified_available_prices):.4f}-${max(verified_available_prices):.4f}")
         
-        # Get unverified-only pricing (includes 'unverified' and 'deverified')
+        # Get unverified-only pricing
         unverified_offers = [o for o in offers if o.get('verification') in ['unverified', 'deverified']]
         unverified_count = len(unverified_offers)
         unverified_available_prices = [
@@ -211,24 +269,92 @@ class VastAIPricer:
         unverified_min_price = None
         
         if unverified_available_prices:
+            unverified_available_prices = self._filter_outliers(unverified_available_prices)
             unverified_available_prices.sort()
             unverified_avg_price = round(sum(unverified_available_prices) / len(unverified_available_prices), 4)
             unverified_min_price = round(min(unverified_available_prices), 4)
-            unverified_median_price = round(unverified_available_prices[len(unverified_available_prices) // 2], 4)
-            self.logger.debug(f"Unverified prices: {len(unverified_available_prices)} offers, range ${unverified_min_price}-${max(unverified_available_prices):.4f}")
+            unverified_median_price = self._percentile(unverified_available_prices, 50)
+            self.logger.debug(f"Unverified prices (filtered): {len(unverified_available_prices)} offers, "
+                           f"range ${unverified_min_price}-${max(unverified_available_prices):.4f}")
         
         if not available_prices:
-            return MarketData(None, None, None, available_count, verified_count, avg_reliability, min_verified_price,
+            return MarketData(None, None, None, None, None, available_count, verified_count,
+                            avg_reliability, avg_disk_space, avg_inet_down, avg_inet_up, min_verified_price,
+                            verified_avg_price, verified_median_price, verified_p25, verified_p75,
                             unverified_count, unverified_avg_price, unverified_median_price, unverified_min_price)
         
+        available_prices = self._filter_outliers(available_prices)
         available_prices.sort()
         avg_price = round(sum(available_prices) / len(available_prices), 4)
         min_price = round(min(available_prices), 4)
-        median_price = round(available_prices[len(available_prices) // 2], 4)
+        median_price = self._percentile(available_prices, 50)
+        p25_price = self._percentile(available_prices, 25)
+        p75_price = self._percentile(available_prices, 75)
         
-        return MarketData(avg_price, median_price, min_price, available_count, verified_count, avg_reliability, min_verified_price,
+        return MarketData(avg_price, median_price, min_price, p25_price, p75_price,
+                        available_count, verified_count,
+                        avg_reliability, avg_disk_space, avg_inet_down, avg_inet_up, min_verified_price,
+                        verified_avg_price, verified_median_price, verified_p25, verified_p75,
                         unverified_count, unverified_avg_price, unverified_median_price, unverified_min_price)
     
+    @staticmethod
+    def _filter_outliers(prices: List[float]) -> List[float]:
+        """Remove extreme outliers using IQR method"""
+        if len(prices) < 4:
+            return prices
+        sorted_p = sorted(prices)
+        q1 = sorted_p[len(sorted_p) // 4]
+        q3 = sorted_p[3 * len(sorted_p) // 4]
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        filtered = [p for p in sorted_p if lower <= p <= upper]
+        return filtered if len(filtered) >= 3 else sorted_p  # fallback if too aggressive
+    
+    @staticmethod
+    def _percentile(sorted_prices: List[float], pct: int) -> float:
+        """Get percentile from a sorted price list"""
+        if not sorted_prices:
+            return 0.0
+        idx = (len(sorted_prices) - 1) * pct / 100
+        lower = int(math.floor(idx))
+        upper = int(math.ceil(idx))
+        if lower == upper:
+            return round(sorted_prices[lower], 4)
+        frac = idx - lower
+        return round(sorted_prices[lower] * (1 - frac) + sorted_prices[upper] * frac, 4)
+    
+    def _get_quality_premium(self, machine: Machine, market: MarketData) -> float:
+        """Calculate a quality multiplier based on machine specs vs market average.
+        Returns a value like 1.08 (8% premium) or 0.95 (5% discount)."""
+        scores = []
+        if market.avg_reliability > 0 and machine.reliability > 0:
+            scores.append(machine.reliability / market.avg_reliability)
+        if market.avg_disk_space > 0 and machine.disk_space > 0:
+            scores.append(min(machine.disk_space / market.avg_disk_space, 2.0))  # cap at 2x
+        if market.avg_inet_down > 0 and machine.inet_down > 0:
+            scores.append(min(machine.inet_down / market.avg_inet_down, 2.0))
+        if market.avg_inet_up > 0 and machine.inet_up > 0:
+            scores.append(min(machine.inet_up / market.avg_inet_up, 2.0))
+        
+        if not scores:
+            return 1.0
+        
+        avg_score = sum(scores) / len(scores)
+        # Scale: 1.0 = average, cap premium at +15%, discount at -10%
+        premium = 1.0 + (avg_score - 1.0) * 0.3
+        return max(0.90, min(premium, 1.15))
+
+    def _apply_step_limit(self, current: float, target: float) -> float:
+        """Limit price changes to max 15% per cycle to avoid whiplash"""
+        if current <= 0:
+            return target
+        max_change = current * 0.15
+        if target > current:
+            return min(target, current + max_change)
+        else:
+            return max(target, current - max_change)
+
     def calculate_price(self, machine: Machine, market: MarketData) -> PriceDecision:
         """Calculate optimal price based on market conditions and machine status"""
         config = self.config
@@ -236,8 +362,9 @@ class VastAIPricer:
         
         # Log machine status
         status = "VERIFIED" if machine.verified else "UNVERIFIED"
+        rental_info = f" | Rented at: ${machine.rental_price}" if machine.rental_price else ""
         self.logger.info(
-            f"Machine #{machine.id}: ${current} | {status} | "
+            f"Machine #{machine.id}: listing=${current} | {status}{rental_info} | "
             f"Reliability: {machine.reliability:.2f} | Disk: {machine.disk_space:.0f}GB | "
             f"Network: {machine.inet_down:.0f}↓/{machine.inet_up:.0f}↑ Mbps"
         )
@@ -247,10 +374,15 @@ class VastAIPricer:
             self.logger.info(
                 f"Market: {market.available_count} available machines (Verified: {market.verified_count}, Unverified: {market.unverified_count})"
             )
+            self.logger.info(
+                f"Market Specs Avg | Reliability: {market.avg_reliability}, Disk: {market.avg_disk_space:.0f}GB, "
+                f"Net: {market.avg_inet_down:.0f}↓/{market.avg_inet_up:.0f}↑ Mbps"
+            )
             
-            if machine.verified and market.min_verified_price:
+            if machine.verified and market.verified_median_price:
                 self.logger.info(
-                    f"Verified Market | Median=${market.median_price}, Avg=${market.avg_price}, Min=${market.min_verified_price}"
+                    f"Verified Market | P25=${market.verified_p25_price}, Median=${market.verified_median_price}, "
+                    f"P75=${market.verified_p75_price}, Min=${market.min_verified_price}"
                 )
             elif not machine.verified and market.unverified_median_price:
                 self.logger.info(
@@ -263,8 +395,14 @@ class VastAIPricer:
             
             self.logger.info(f"Avg Reliability: {market.avg_reliability}")
             
+            quality_premium = self._get_quality_premium(machine, market)
+            self.logger.info(f"Your quality premium: {quality_premium:.2f}x ({'+' if quality_premium >= 1 else ''}{(quality_premium-1)*100:.1f}%)")
+            
             position = self._get_price_position(current, market, machine.verified)
             self.logger.info(f"Your price position: {position}")
+            
+            if machine.id in self.last_rented_price:
+                self.logger.info(f"Last rented at: ${self.last_rented_price[machine.id]}")
         
         # Track idle duration
         idle_hours = self._get_idle_hours(machine)
@@ -273,7 +411,7 @@ class VastAIPricer:
 
         # Strategy depends on rental status
         if machine.is_rented:
-            return self._price_for_rented_machine(current, market)
+            return self._price_for_rented_machine(current, market, machine)
         else:
             return self._price_for_idle_machine(current, market, machine, idle_hours)
     
@@ -306,76 +444,115 @@ class VastAIPricer:
         return (time.time() - self.idle_since[machine.id]) / 3600.0
 
     def update_idle_tracking(self, machine: Machine):
-        """Update idle-since tracking for a machine"""
+        """Update idle-since tracking and last-rented-price for a machine"""
         if machine.is_rented:
-            # Machine is rented — clear idle timestamp
+            # Record rental price only on transition (idle -> rented)
+            # Use actual rental_price if available, fall back to listing price
+            if machine.id not in self.last_rented_price or machine.id in self.idle_since:
+                price = machine.rental_price if machine.rental_price else machine.current_price
+                self.last_rented_price[machine.id] = price
+                self.logger.info(f"Recording rental price for machine {machine.id}: ${price}")
+            # Clear idle timestamp
             if machine.id in self.idle_since:
                 del self.idle_since[machine.id]
         else:
-            # Machine is idle — record first-seen idle time if not already tracked
+            # Record first-seen idle time if not already tracked
             if machine.id not in self.idle_since:
                 self.idle_since[machine.id] = time.time()
-        self._save_idle_state()
+        self._save_state()
 
-    def _price_for_rented_machine(self, current: float, market: MarketData) -> PriceDecision:
-        """Pricing strategy for currently rented machines - raise price above median"""
-        if not market.median_price:
+    def _price_for_rented_machine(self, current: float, market: MarketData, machine: Machine) -> PriceDecision:
+        """Pricing strategy for currently rented machines - raise price above peer-group median with quality premium"""
+        if machine.verified and market.verified_median_price:
+            peer_median = market.verified_median_price
+            peer_p75 = market.verified_p75_price
+            peer_label = "verified median"
+        else:
+            peer_median = market.median_price
+            peer_p75 = market.p75_price
+            peer_label = "overall median"
+
+        if not peer_median:
             return PriceDecision(current, "HOLD", "Machine is RENTED but no market data - holding price")
 
-        target = market.median_price * 1.05
+        quality = self._get_quality_premium(machine, market)
+        # Target: 105% of median * quality premium, but don't exceed P75
+        target = peer_median * 1.05 * quality
+        if peer_p75:
+            target = min(target, peer_p75)
+        target = self._apply_step_limit(current, target)
         target = self._clamp_price(target)
 
         if current >= target:
-            return PriceDecision(current, "HOLD", f"Machine is RENTED and already above median - holding at ${current}")
+            return PriceDecision(current, "HOLD",
+                f"Machine is RENTED and already at ${current} (target ${target} from {peer_label}) - holding")
 
         return PriceDecision(
             target,
             "INCREASE",
-            f"Machine is RENTED - increasing price to 105% of median (${market.median_price} -> ${target})"
+            f"Machine is RENTED - raising to ${target} ({peer_label}=${peer_median}, quality={quality:.2f}x)"
         )
     
     def _price_for_idle_machine(self, current: float, market: MarketData, machine: Machine, idle_hours: float) -> PriceDecision:
-        """Pricing strategy for idle machines:
-        - Default: drop to median
-        - After 24h idle: drop below median aggressively
+        """Pricing strategy for idle machines with graduated tiers:
+        - 0-6h:   Hold at median (let the listing settle)
+        - 6-12h:  Drop to 95% of median
+        - 12-24h: Drop to 90% of median
+        - 24-48h: Drop to peer-group minimum
+        - 48h+:   Drop to 92% of minimum (floor defense)
         """
         if not market.median_price:
             return PriceDecision(
-                self._clamp_price(current * 0.9),
+                self._clamp_price(current * 0.95),
                 "DECREASE",
-                "Machine IDLE + no market data - decreasing to attract customers"
+                "Machine IDLE + no market data - decreasing 5% to attract customers"
             )
 
-        reference_min = market.min_verified_price if (machine.verified and market.min_verified_price) else market.min_price
-
-        if idle_hours < 24:
-            # Idle less than 24h — drop to median, but don't go below it
-            target = market.median_price
-            if current > target:
-                return PriceDecision(
-                    self._clamp_price(target),
-                    "DECREASE",
-                    f"Machine IDLE ({idle_hours:.1f}h) - dropping to median ${target}"
-                )
-            return PriceDecision(
-                current,
-                "HOLD",
-                f"Machine IDLE ({idle_hours:.1f}h) - already at/below median, waiting before going lower"
-            )
+        if machine.verified and market.verified_median_price:
+            peer_median = market.verified_median_price
+            peer_label = "verified"
         else:
-            # Idle 24h+ — go below median aggressively
-            if current > reference_min:
-                target = reference_min * 0.92
-                return PriceDecision(
-                    self._clamp_price(target),
-                    "DECREASE",
-                    f"Machine IDLE {idle_hours:.1f}h (>24h) - dropping below median near market min"
-                )
+            peer_median = market.median_price
+            peer_label = "overall"
+        reference_min = market.min_verified_price if (machine.verified and market.min_verified_price) else market.min_price
+        last_rented = self.last_rented_price.get(machine.id)
+
+        # Determine target based on idle duration tier
+        if idle_hours < 6:
+            target = peer_median
+            tier = f"<6h: {peer_label} median"
+        elif idle_hours < 12:
+            target = peer_median * 0.95
+            tier = f"6-12h: 95% of {peer_label} median"
+        elif idle_hours < 24:
+            target = peer_median * 0.90
+            tier = f"12-24h: 90% of {peer_label} median"
+        elif idle_hours < 48:
+            target = reference_min
+            tier = f"24-48h: {peer_label} minimum"
+        else:
+            target = reference_min * 0.92
+            tier = f"48h+: 92% of {peer_label} minimum"
+
+        # Don't drop below last-rented price in early tiers (< 24h)
+        if last_rented and idle_hours < 24 and target < last_rented:
+            target = last_rented
+            tier += f" (floored at last-rented ${last_rented})"
+
+        target = self._apply_step_limit(current, target)
+        target = self._clamp_price(target)
+
+        if current > target:
             return PriceDecision(
-                current,
-                "HOLD",
-                f"Machine IDLE {idle_hours:.1f}h (>24h) - already at/below market minimum"
+                target,
+                "DECREASE",
+                f"Machine IDLE {idle_hours:.1f}h - {tier} -> ${target}"
             )
+        return PriceDecision(
+            current,
+            "HOLD",
+            f"Machine IDLE {idle_hours:.1f}h - already at/below target ${target} ({tier})"
+        )
     
     def _clamp_price(self, price: float) -> float:
         """Ensure price stays within configured bounds"""
