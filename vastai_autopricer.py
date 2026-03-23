@@ -150,6 +150,9 @@ class VastAIPricer:
         if not response or 'machines' not in response:
             return []
         
+        # Get rental prices from instances API
+        rental_prices = self._get_rental_prices()
+        
         machines = []
         target_gpu = self.config['target_gpu']
         target_count = self.config['target_num_gpus']
@@ -160,23 +163,11 @@ class VastAIPricer:
             
             # Filter by target GPU and count
             if gpu_name == target_gpu and num_gpus == target_count:
+                machine_id = machine_data['id']
                 is_rented = machine_data['current_rentals_running'] > 0
-                # Get actual rental price — try multiple API fields
-                rental_price = None
-                if is_rented:
-                    for price_field in ['cur_bid', 'bid_price', 'dph_base', 'price_per_gpu']:
-                        val = machine_data.get(price_field)
-                        if val and val > 0:
-                            rental_price = val
-                            break
-                    self.logger.debug(f"Machine {machine_data['id']} rental price fields: "
-                                    f"cur_bid={machine_data.get('cur_bid')}, "
-                                    f"bid_price={machine_data.get('bid_price')}, "
-                                    f"dph_base={machine_data.get('dph_base')}, "
-                                    f"price_per_gpu={machine_data.get('price_per_gpu')}, "
-                                    f"min_bid_price={machine_data.get('min_bid_price')}")
+                rental_price = rental_prices.get(machine_id)
                 machines.append(Machine(
-                    id=machine_data['id'],
+                    id=machine_id,
                     gpu_name=gpu_name,
                     num_gpus=num_gpus,
                     current_price=machine_data['min_bid_price'],
@@ -190,6 +181,25 @@ class VastAIPricer:
                 ))
         
         return machines
+    
+    def _get_rental_prices(self) -> Dict[int, float]:
+        """Get actual rental prices from running instances, keyed by machine_id"""
+        instances = self.run_vastai_command(['vastai', 'show', 'instances', '--raw'])
+        prices = {}
+        if not instances:
+            return prices
+        # instances can be a list of instance dicts
+        instance_list = instances if isinstance(instances, list) else instances.get('instances', [])
+        for inst in instance_list:
+            machine_id = inst.get('machine_id')
+            # Try fields that represent the actual rental rate
+            for field in ['dph_base', 'dph_total', 'min_bid']:
+                val = inst.get(field)
+                if val and val > 0 and machine_id:
+                    prices[machine_id] = round(val, 4)
+                    self.logger.debug(f"Instance on machine {machine_id}: {field}=${val}")
+                    break
+        return prices
     
     def get_market_data(self, gpu_name: str, num_gpus: int) -> MarketData:
         """Analyze market for comparable machines"""
@@ -325,25 +335,40 @@ class VastAIPricer:
         return round(sorted_prices[lower] * (1 - frac) + sorted_prices[upper] * frac, 4)
     
     def _get_quality_premium(self, machine: Machine, market: MarketData) -> float:
-        """Calculate a quality multiplier based on machine specs vs market average.
-        Returns a value like 1.08 (8% premium) or 0.95 (5% discount)."""
-        scores = []
-        if market.avg_reliability > 0 and machine.reliability > 0:
-            scores.append(machine.reliability / market.avg_reliability)
-        if market.avg_disk_space > 0 and machine.disk_space > 0:
-            scores.append(min(machine.disk_space / market.avg_disk_space, 2.0))  # cap at 2x
-        if market.avg_inet_down > 0 and machine.inet_down > 0:
-            scores.append(min(machine.inet_down / market.avg_inet_down, 2.0))
-        if market.avg_inet_up > 0 and machine.inet_up > 0:
-            scores.append(min(machine.inet_up / market.avg_inet_up, 2.0))
+        """Calculate a quality multiplier based on machine specs vs market.
+        Uses weighted scoring: reliability (40%), disk (35%), network (25%).
+        Compares against medians to avoid outlier skew."""
+        weighted_score = 0.0
+        total_weight = 0.0
         
-        if not scores:
+        # Reliability: most important for uptime-sensitive renters (weight: 40%)
+        if market.avg_reliability > 0 and machine.reliability > 0:
+            ratio = min(machine.reliability / market.avg_reliability, 1.5)
+            weighted_score += ratio * 0.40
+            total_weight += 0.40
+        
+        # Disk: matters for datasets/models (weight: 35%)
+        if market.avg_disk_space > 0 and machine.disk_space > 0:
+            ratio = min(machine.disk_space / market.avg_disk_space, 2.0)
+            weighted_score += ratio * 0.35
+            total_weight += 0.35
+        
+        # Network: nice-to-have but a few 10Gbps machines skew averages (weight: 25%)
+        # Use geometric mean of down+up vs market to reduce outlier impact
+        if market.avg_inet_down > 0 and market.avg_inet_up > 0 and machine.inet_down > 0 and machine.inet_up > 0:
+            my_net = math.sqrt(machine.inet_down * machine.inet_up)
+            market_net = math.sqrt(market.avg_inet_down * market.avg_inet_up)
+            ratio = min(my_net / market_net, 2.0)
+            weighted_score += ratio * 0.25
+            total_weight += 0.25
+        
+        if total_weight == 0:
             return 1.0
         
-        avg_score = sum(scores) / len(scores)
-        # Scale: 1.0 = average, cap premium at +15%, discount at -10%
-        premium = 1.0 + (avg_score - 1.0) * 0.3
-        return max(0.90, min(premium, 1.15))
+        avg_score = weighted_score / total_weight
+        # Scale: 1.0 = average, cap premium at +10%, discount at -5%
+        premium = 1.0 + (avg_score - 1.0) * 0.25
+        return max(0.95, min(premium, 1.10))
 
     def _apply_step_limit(self, current: float, target: float) -> float:
         """Limit price changes to max 15% per cycle to avoid whiplash"""
