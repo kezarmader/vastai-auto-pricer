@@ -7,6 +7,7 @@ Automatically adjusts pricing for Vast.ai hosted machines based on market demand
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -60,8 +61,29 @@ class VastAIPricer:
     
     def __init__(self, config: Dict):
         self.config = config
+        self.idle_since: Dict[int, float] = {}  # machine_id -> timestamp when idle was first seen
+        self._idle_state_file = 'vastai_idle_state.json'
+        self._load_idle_state()
         self.setup_logging()
         
+    def _load_idle_state(self):
+        """Load persisted idle-since timestamps from disk"""
+        if os.path.exists(self._idle_state_file):
+            try:
+                with open(self._idle_state_file, 'r') as f:
+                    raw = json.load(f)
+                self.idle_since = {int(k): v for k, v in raw.items()}
+            except (json.JSONDecodeError, IOError):
+                self.idle_since = {}
+
+    def _save_idle_state(self):
+        """Persist idle-since timestamps to disk"""
+        try:
+            with open(self._idle_state_file, 'w') as f:
+                json.dump(self.idle_since, f)
+        except IOError:
+            pass
+
     def setup_logging(self):
         """Configure logging"""
         log_format = '[%(asctime)s] %(message)s'
@@ -244,11 +266,16 @@ class VastAIPricer:
             position = self._get_price_position(current, market, machine.verified)
             self.logger.info(f"Your price position: {position}")
         
+        # Track idle duration
+        idle_hours = self._get_idle_hours(machine)
+        if not machine.is_rented:
+            self.logger.info(f"Idle for: {idle_hours:.1f} hours")
+
         # Strategy depends on rental status
         if machine.is_rented:
             return self._price_for_rented_machine(current, market)
         else:
-            return self._price_for_idle_machine(current, market, machine)
+            return self._price_for_idle_machine(current, market, machine, idle_hours)
     
     def _get_price_position(self, current_price: float, market: MarketData, is_verified: bool) -> str:
         """Determine price position relative to market"""
@@ -270,61 +297,85 @@ class VastAIPricer:
         else:
             return "Below market"
     
+    def _get_idle_hours(self, machine: Machine) -> float:
+        """Get how many hours this machine has been continuously idle"""
+        if machine.is_rented:
+            return 0.0
+        if machine.id not in self.idle_since:
+            return 0.0
+        return (time.time() - self.idle_since[machine.id]) / 3600.0
+
+    def update_idle_tracking(self, machine: Machine):
+        """Update idle-since tracking for a machine"""
+        if machine.is_rented:
+            # Machine is rented — clear idle timestamp
+            if machine.id in self.idle_since:
+                del self.idle_since[machine.id]
+        else:
+            # Machine is idle — record first-seen idle time if not already tracked
+            if machine.id not in self.idle_since:
+                self.idle_since[machine.id] = time.time()
+        self._save_idle_state()
+
     def _price_for_rented_machine(self, current: float, market: MarketData) -> PriceDecision:
-        """Pricing strategy for currently rented machines"""
-        # Conservative: hold price while rented
+        """Pricing strategy for currently rented machines - raise price above median"""
+        if not market.median_price:
+            return PriceDecision(current, "HOLD", "Machine is RENTED but no market data - holding price")
+
+        target = market.median_price * 1.05
+        target = self._clamp_price(target)
+
+        if current >= target:
+            return PriceDecision(current, "HOLD", f"Machine is RENTED and already above median - holding at ${current}")
+
         return PriceDecision(
-            current,
-            "HOLD",
-            f"Machine is RENTED - holding current price"
+            target,
+            "INCREASE",
+            f"Machine is RENTED - increasing price to 105% of median (${market.median_price} -> ${target})"
         )
     
-    def _price_for_idle_machine(self, current: float, market: MarketData, machine: Machine) -> PriceDecision:
-        """Pricing strategy for idle machines - be aggressive to get rentals"""
-        config = self.config
-        
+    def _price_for_idle_machine(self, current: float, market: MarketData, machine: Machine, idle_hours: float) -> PriceDecision:
+        """Pricing strategy for idle machines:
+        - Default: drop to median
+        - After 24h idle: drop below median aggressively
+        """
         if not market.median_price:
-            # No market data - decrease to attract
             return PriceDecision(
                 self._clamp_price(current * 0.9),
                 "DECREASE",
                 "Machine IDLE + no market data - decreasing to attract customers"
             )
-        
-        # Use verified minimum as benchmark if machine is verified
+
         reference_min = market.min_verified_price if (machine.verified and market.min_verified_price) else market.min_price
-        
-        # Diagnose why machine is idle based on price position
-        
-        if current > market.median_price:
-            # Too expensive - drop to 90% of median (or 95% if verified)
-            multiplier = 0.95 if machine.verified else 0.90
-            target = market.median_price * multiplier
-            return PriceDecision(
-                self._clamp_price(target),
-                "DECREASE",
-                f"Machine IDLE + priced above median - dropping to {int(multiplier*100)}% of median"
-            )
-        
-        elif current > reference_min:
-            # Between min and median - be aggressive
-            target = reference_min * 0.92
-            if abs(target - current) > current * 0.05:  # Only if 5%+ change
+
+        if idle_hours < 24:
+            # Idle less than 24h — drop to median, but don't go below it
+            target = market.median_price
+            if current > target:
                 return PriceDecision(
                     self._clamp_price(target),
                     "DECREASE",
-                    f"Machine IDLE - pricing near market minimum to attract customers"
+                    f"Machine IDLE ({idle_hours:.1f}h) - dropping to median ${target}"
                 )
-        
+            return PriceDecision(
+                current,
+                "HOLD",
+                f"Machine IDLE ({idle_hours:.1f}h) - already at/below median, waiting before going lower"
+            )
         else:
-            # Already cheapest - hold and wait
-            pass
-        
-        return PriceDecision(
-            current,
-            "HOLD",
-            f"Machine IDLE but already at/below market minimum - holding price"
-        )
+            # Idle 24h+ — go below median aggressively
+            if current > reference_min:
+                target = reference_min * 0.92
+                return PriceDecision(
+                    self._clamp_price(target),
+                    "DECREASE",
+                    f"Machine IDLE {idle_hours:.1f}h (>24h) - dropping below median near market min"
+                )
+            return PriceDecision(
+                current,
+                "HOLD",
+                f"Machine IDLE {idle_hours:.1f}h (>24h) - already at/below market minimum"
+            )
     
     def _clamp_price(self, price: float) -> float:
         """Ensure price stays within configured bounds"""
@@ -356,6 +407,9 @@ class VastAIPricer:
             return
         
         for machine in machines:
+            # Update idle tracking before pricing
+            self.update_idle_tracking(machine)
+
             status = "RENTED" if machine.is_rented else "AVAILABLE"
             self.logger.info(
                 f"--- Machine {machine.id} ({machine.num_gpus} x {machine.gpu_name}) | "
