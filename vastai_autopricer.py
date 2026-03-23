@@ -163,7 +163,7 @@ class VastAIPricer:
                     id=machine_data['id'],
                     gpu_name=gpu_name,
                     num_gpus=num_gpus,
-                    current_price=machine_data['min_bid_price'],
+                    current_price=machine_data.get('listed_gpu_cost') or machine_data.get('min_bid_price', 0),
                     is_rented=machine_data['current_rentals_running'] > 0,
                     verified=machine_data.get('verification') == 'verified' or machine_data.get('verified', False),
                     reliability=machine_data.get('reliability2', 0.0),
@@ -555,17 +555,18 @@ class VastAIPricer:
         return round(max(self.config['base_price'], min(price, self.config['max_price'])), 4)
     
     def update_machine_price(self, machine_id: int, new_price: float) -> bool:
-        """Update machine price on Vast.ai"""
+        """Update machine listing price on Vast.ai using 'list machine --price_gpu'"""
         if self.config['test_mode']:
             self.logger.info(f"TEST MODE: Would update machine {machine_id} to ${new_price}/GPU/hr")
             return True
         
         result = self.run_vastai_command([
-            'vastai', 'set', 'min-bid', str(machine_id), '--price', str(new_price), '--raw'
+            'vastai', 'list', 'machine', str(machine_id),
+            '--price_gpu', str(new_price), '--raw'
         ])
         
         if result and result.get('success'):
-            self.logger.info(f"SUCCESS: Updated machine {machine_id} to ${new_price}/GPU/hr")
+            self.logger.info(f"SUCCESS: Updated machine {machine_id} listing to ${new_price}/GPU/hr")
             return True
         else:
             self.logger.error(f"FAILED: Could not update machine {machine_id}")
