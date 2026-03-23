@@ -490,20 +490,14 @@ class VastAIPricer:
         )
     
     def _price_for_idle_machine(self, current: float, market: MarketData, machine: Machine, idle_hours: float) -> PriceDecision:
-        """Pricing strategy for idle machines with graduated tiers:
-        - 0-6h:   Hold at median (let the listing settle)
-        - 6-12h:  Drop to 95% of median
-        - 12-24h: Drop to 90% of median
-        - 24-48h: Drop to peer-group minimum
-        - 48h+:   Drop to 92% of minimum (floor defense)
+        """Pricing strategy for idle machines - gradual descent from last rented price:
+        - 0-6h:   Hold at last rented price (give the market time)
+        - 6-12h:  Drop 5% from last rented price
+        - 12-24h: Drop 10% from last rented price
+        - 24-48h: Drop 20% from last rented price
+        - 48h+:   Drop to median as last resort
+        All targets are floored at base_price via clamp.
         """
-        if not market.median_price:
-            return PriceDecision(
-                self._clamp_price(current * 0.95),
-                "DECREASE",
-                "Machine IDLE + no market data - decreasing 5% to attract customers"
-            )
-
         if machine.verified and market.verified_median_price:
             peer_median = market.verified_median_price
             peer_label = "verified"
@@ -511,29 +505,40 @@ class VastAIPricer:
             peer_median = market.median_price
             peer_label = "overall"
         reference_min = market.min_verified_price if (machine.verified and market.min_verified_price) else market.min_price
-        last_rented = self.last_rented_price.get(machine.id)
 
-        # Determine target based on idle duration tier
+        # Anchor: last rented price, or current listing if no history
+        anchor = self.last_rented_price.get(machine.id, current)
+
+        if not market.median_price:
+            target = anchor * 0.95
+            return PriceDecision(
+                self._clamp_price(target),
+                "DECREASE",
+                f"Machine IDLE + no market data - 5% off anchor ${anchor}"
+            )
+
+        # Graduated descent from anchor price
         if idle_hours < 6:
-            target = peer_median
-            tier = f"<6h: {peer_label} median"
+            target = anchor
+            tier = f"<6h: holding at anchor ${anchor}"
         elif idle_hours < 12:
-            target = peer_median * 0.95
-            tier = f"6-12h: 95% of {peer_label} median"
+            target = anchor * 0.95
+            tier = f"6-12h: 95% of anchor ${anchor}"
         elif idle_hours < 24:
-            target = peer_median * 0.90
-            tier = f"12-24h: 90% of {peer_label} median"
+            target = anchor * 0.90
+            tier = f"12-24h: 90% of anchor ${anchor}"
         elif idle_hours < 48:
-            target = reference_min
-            tier = f"24-48h: {peer_label} minimum"
+            target = anchor * 0.80
+            tier = f"24-48h: 80% of anchor ${anchor}"
         else:
-            target = reference_min * 0.92
-            tier = f"48h+: 92% of {peer_label} minimum"
+            # Last resort: fall to median
+            target = peer_median
+            tier = f"48h+: {peer_label} median ${peer_median}"
 
-        # Don't drop below last-rented price in early tiers (< 24h)
-        if last_rented and idle_hours < 24 and target < last_rented:
-            target = last_rented
-            tier += f" (floored at last-rented ${last_rented})"
+        # Never go below market minimum regardless of tier
+        if reference_min and target < reference_min * 0.90:
+            target = reference_min * 0.90
+            tier += f" (floored at 90% of market min ${reference_min})"
 
         target = self._apply_step_limit(current, target)
         target = self._clamp_price(target)
