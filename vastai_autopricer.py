@@ -59,7 +59,6 @@ class Machine:
     gpu_name: str
     num_gpus: int
     current_price: float    # min_bid_price (listing floor)
-    rental_price: Optional[float]  # actual price the renter is paying
     is_rented: bool
     verified: bool
     reliability: float
@@ -150,9 +149,6 @@ class VastAIPricer:
         if not response or 'machines' not in response:
             return []
         
-        # Get rental prices from instances API
-        rental_prices = self._get_rental_prices()
-        
         machines = []
         target_gpu = self.config['target_gpu']
         target_count = self.config['target_num_gpus']
@@ -163,16 +159,12 @@ class VastAIPricer:
             
             # Filter by target GPU and count
             if gpu_name == target_gpu and num_gpus == target_count:
-                machine_id = machine_data['id']
-                is_rented = machine_data['current_rentals_running'] > 0
-                rental_price = rental_prices.get(machine_id)
                 machines.append(Machine(
-                    id=machine_id,
+                    id=machine_data['id'],
                     gpu_name=gpu_name,
                     num_gpus=num_gpus,
                     current_price=machine_data['min_bid_price'],
-                    rental_price=rental_price,
-                    is_rented=is_rented,
+                    is_rented=machine_data['current_rentals_running'] > 0,
                     verified=machine_data.get('verification') == 'verified' or machine_data.get('verified', False),
                     reliability=machine_data.get('reliability2', 0.0),
                     disk_space=machine_data.get('disk_space', 0.0),
@@ -181,25 +173,6 @@ class VastAIPricer:
                 ))
         
         return machines
-    
-    def _get_rental_prices(self) -> Dict[int, float]:
-        """Get actual rental prices from running instances, keyed by machine_id"""
-        instances = self.run_vastai_command(['vastai', 'show', 'instances', '--raw'])
-        prices = {}
-        if not instances:
-            return prices
-        # instances can be a list of instance dicts
-        instance_list = instances if isinstance(instances, list) else instances.get('instances', [])
-        for inst in instance_list:
-            machine_id = inst.get('machine_id')
-            # Try fields that represent the actual rental rate
-            for field in ['dph_base', 'dph_total', 'min_bid']:
-                val = inst.get(field)
-                if val and val > 0 and machine_id:
-                    prices[machine_id] = round(val, 4)
-                    self.logger.debug(f"Instance on machine {machine_id}: {field}=${val}")
-                    break
-        return prices
     
     def get_market_data(self, gpu_name: str, num_gpus: int) -> MarketData:
         """Analyze market for comparable machines"""
@@ -387,7 +360,7 @@ class VastAIPricer:
         
         # Log machine status
         status = "VERIFIED" if machine.verified else "UNVERIFIED"
-        rental_info = f" | Rented at: ${machine.rental_price}" if machine.rental_price else ""
+        rental_info = f" | Rented at: ~${machine.current_price}" if machine.is_rented else ""
         self.logger.info(
             f"Machine #{machine.id}: listing=${current} | {status}{rental_info} | "
             f"Reliability: {machine.reliability:.2f} | Disk: {machine.disk_space:.0f}GB | "
@@ -471,14 +444,12 @@ class VastAIPricer:
     def update_idle_tracking(self, machine: Machine):
         """Update idle-since tracking and last-rented-price for a machine"""
         if machine.is_rented:
-            # Record rental price only on transition (idle -> rented)
-            # Use actual rental_price if available, fall back to listing price
-            if machine.id not in self.last_rented_price or machine.id in self.idle_since:
-                price = machine.rental_price if machine.rental_price else machine.current_price
-                self.last_rented_price[machine.id] = price
-                self.logger.info(f"Recording rental price for machine {machine.id}: ${price}")
-            # Clear idle timestamp
+            # Record listing price on idle->rented transition as best approximation
+            # The actual rental rate is >= min_bid_price but not exposed by host API
             if machine.id in self.idle_since:
+                # This is the transition moment — the listing price right before rental
+                self.last_rented_price[machine.id] = machine.current_price
+                self.logger.info(f"Machine {machine.id} rented! Listing was ${machine.current_price} (actual rate >= this)")
                 del self.idle_since[machine.id]
         else:
             # Record first-seen idle time if not already tracked
